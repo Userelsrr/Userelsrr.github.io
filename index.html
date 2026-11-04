@@ -539,6 +539,73 @@ a{color:inherit;text-decoration:none}
       (/^[\w-]+(\.[\w-]+)+([\/?#].*)?$/.test(v)&&v.indexOf(' ')<0);
   }
 
+  /* 联网联想
+     SUGGEST_ENDPOINT 留空 → 百度 sugrec 的 JSONP（免账号、免代理、UTF-8，
+     script 标签天然不受 CORS 限制）；填入 Cloudflare Worker 地址 → 改用 Bing
+     联想（Worker 内容与部署方法见 suggest-worker.js）。任何失败都回落到本地。 */
+  var SUGGEST_ENDPOINT='';   /* 例：'https://nav-suggest.你的子域.workers.dev' */
+  var remote=[],remoteFor='',pullT=0,pullSeq=0;
+  function pullSug(term){
+    if(pullT){clearTimeout(pullT);pullT=0}
+    if(!term||isUrl(term)){remote=[];remoteFor='';return}
+    if(term===remoteFor)return;          /* 同一词只请求一次；失败会复位故可重试 */
+    pullT=setTimeout(function(){doPull(term)},160);
+  }
+  function doPull(term){
+    if(SUGGEST_ENDPOINT){doFetch(term);return}
+    var seq=++pullSeq,cb='navSug'+seq+'_'+Date.now();
+    var sc=document.createElement('script'),done=false;
+    var timer=setTimeout(function(){finish(1)},4000);
+    function finish(fail){
+      if(done)return;done=true;
+      clearTimeout(timer);
+      if(sc.parentNode)sc.parentNode.removeChild(sc);
+      try{delete window[cb]}catch(e){window[cb]=null}
+      if(seq!==pullSeq||term!==q.value.trim())return;  /* 过期，丢弃 */
+      if(fail){remote=[];remoteFor='';return}
+      if(!sug.hidden)renderSug();   /* 面板已关就不重新弹出 */
+    }
+    window[cb]=function(d){
+      if(seq!==pullSeq||term!==q.value.trim()){finish(0);return}
+      remoteFor=term;remote=[];
+      var arr=(d&&d.g)||[];
+      for(var i=0;i<arr.length&&remote.length<6;i++){
+        var s=arr[i]&&arr[i].q;
+        if(s&&s!==term&&remote.indexOf(s)<0)remote.push(s);
+      }
+      finish(0);
+    };
+    sc.src='https://www.baidu.com/sugrec?prod=pc&wd='+encodeURIComponent(term)+'&cb='+cb;
+    sc.onerror=function(){finish(1)};
+    document.head.appendChild(sc);
+  }
+
+  /* Worker/Bing 通道：普通 fetch，4s 超时，复用与 JSONP 相同的过期与复位规则 */
+  function doFetch(term){
+    var seq=++pullSeq;
+    var ctl=(typeof AbortController!=='undefined')?new AbortController():null;
+    var timer=setTimeout(function(){if(ctl)ctl.abort()},4000);
+    function stale(){return seq!==pullSeq||term!==q.value.trim()}
+    fetch(SUGGEST_ENDPOINT+'?q='+encodeURIComponent(term),ctl?{signal:ctl.signal}:null)
+      .then(function(r){if(!r.ok)throw 0;return r.json()})
+      .then(function(d){
+        clearTimeout(timer);
+        if(stale())return;
+        remoteFor=term;remote=[];
+        var arr=(d&&d.s)||[];
+        for(var i=0;i<arr.length&&remote.length<6;i++){
+          var s=arr[i];
+          if(s&&s!==term&&remote.indexOf(s)<0)remote.push(s);
+        }
+        if(!sug.hidden)renderSug();
+      })
+      .catch(function(){
+        clearTimeout(timer);
+        if(stale())return;
+        remote=[];remoteFor='';          /* 失败复位，下次输入重试 */
+      });
+  }
+
   function renderSug(){
     var term=q.value.trim();
     var out=[],used={};
@@ -560,6 +627,16 @@ a{color:inherit;text-decoration:none}
       out.push({t:'hist',tx:mark(h,term),raw:h,tag:'历史',
                 icon:'<svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1010 10A10 10 0 0012 2zm0 2a8 8 0 11-8 8 8 8 0 018-8zm-.5 3v6.2l5.2 3 .8-1.35-4.5-2.65V7z"/></svg>'});
     });
+
+    /* 联网联想：与历史共用去重键，同一句不出现两次 */
+    if(term&&!isUrl(term)){
+      remote.forEach(function(r){
+        if(used['h'+r])return;
+        used['h'+r]=1;
+        out.push({t:'sug',tx:mark(r,term),raw:r,tag:'联网',
+                  icon:'<svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 100 20 10 10 0 000-20zm6.93 9h-3.1a15.6 15.6 0 00-1.36-5.8A8.02 8.02 0 0118.92 11zM12 4.06c.9 1.2 1.9 3.4 2.26 6.94H9.74C10.1 7.46 11.1 5.26 12 4.06zM4.08 13h3.1c.14 2.14.57 4.14 1.36 5.8A8.02 8.02 0 014.08 13zm3.1-2h-3.1a8.02 8.02 0 014.46-5.8A15.6 15.6 0 007.18 11zM12 19.94c-.9-1.2-1.9-3.4-2.26-6.94h4.52c-.36 3.54-1.36 5.74-2.26 6.94zm2.94-1.14c.79-1.66 1.22-3.66 1.36-5.8h3.1a8.02 8.02 0 01-4.46 5.8z"/></svg>'});
+      });
+    }
 
     /* 站内直达 */
     if(term){
@@ -611,12 +688,13 @@ a{color:inherit;text-decoration:none}
     var o=sugItems[i];if(!o)return;
     if(o.t==='search'){pushHist(q.value.trim());hideSug();openNow(q.value.trim());return}
     if(o.t==='url'){hideSug();openNow(o.raw);return}
-    if(o.t==='hist'){q.value=o.raw;filter();hideSug();openNow(o.raw);return}
+    if(o.t==='hist'){q.value=o.raw;filter();remote=[];remoteFor='';hideSug();openNow(o.raw);return}
+    if(o.t==='sug'){q.value=o.raw;filter();remote=[];remoteFor='';pushHist(o.raw);hideSug();openNow(o.raw);return}
     if(o.t==='site'){hideSug();window.open(o.raw,'_blank','noopener');return}
   }
 
-  q.addEventListener('focus',renderSug);
-  q.addEventListener('input',function(){filter();renderSug()});
+  q.addEventListener('focus',function(){renderSug();pullSug(q.value.trim())});
+  q.addEventListener('input',function(){filter();renderSug();pullSug(q.value.trim())});
   sug.addEventListener('mousedown',function(e){e.preventDefault()});
   sug.addEventListener('click',function(e){
     var b=e.target.closest('.opt');if(!b)return;
