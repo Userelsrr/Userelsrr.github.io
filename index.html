@@ -539,8 +539,11 @@ a{color:inherit;text-decoration:none}
       (/^[\w-]+(\.[\w-]+)+([\/?#].*)?$/.test(v)&&v.indexOf(' ')<0);
   }
 
-  /* 联网联想：百度 sugrec 的 JSONP 回调（免账号、免代理、UTF-8）。
-     script 标签不受 CORS 限制；失败时本地历史/直达照常兜底。 */
+  /* 联网联想
+     SUGGEST_ENDPOINT 留空 → 百度 sugrec 的 JSONP（免账号、免代理、UTF-8，
+     script 标签天然不受 CORS 限制）；填入 Cloudflare Worker 地址 → 改用 Bing
+     联想（Worker 内容与部署方法见 suggest-worker.js）。任何失败都回落到本地。 */
+  var SUGGEST_ENDPOINT='';   /* 例：'https://nav-suggest.你的子域.workers.dev' */
   var remote=[],remoteFor='',pullT=0,pullSeq=0;
   function pullSug(term){
     if(pullT){clearTimeout(pullT);pullT=0}
@@ -549,6 +552,7 @@ a{color:inherit;text-decoration:none}
     pullT=setTimeout(function(){doPull(term)},160);
   }
   function doPull(term){
+    if(SUGGEST_ENDPOINT){doFetch(term);return}
     var seq=++pullSeq,cb='navSug'+seq+'_'+Date.now();
     var sc=document.createElement('script'),done=false;
     var timer=setTimeout(function(){finish(1)},4000);
@@ -574,6 +578,32 @@ a{color:inherit;text-decoration:none}
     sc.src='https://www.baidu.com/sugrec?prod=pc&wd='+encodeURIComponent(term)+'&cb='+cb;
     sc.onerror=function(){finish(1)};
     document.head.appendChild(sc);
+  }
+
+  /* Worker/Bing 通道：普通 fetch，4s 超时，复用与 JSONP 相同的过期与复位规则 */
+  function doFetch(term){
+    var seq=++pullSeq;
+    var ctl=(typeof AbortController!=='undefined')?new AbortController():null;
+    var timer=setTimeout(function(){if(ctl)ctl.abort()},4000);
+    function stale(){return seq!==pullSeq||term!==q.value.trim()}
+    fetch(SUGGEST_ENDPOINT+'?q='+encodeURIComponent(term),ctl?{signal:ctl.signal}:null)
+      .then(function(r){if(!r.ok)throw 0;return r.json()})
+      .then(function(d){
+        clearTimeout(timer);
+        if(stale())return;
+        remoteFor=term;remote=[];
+        var arr=(d&&d.s)||[];
+        for(var i=0;i<arr.length&&remote.length<6;i++){
+          var s=arr[i];
+          if(s&&s!==term&&remote.indexOf(s)<0)remote.push(s);
+        }
+        if(!sug.hidden)renderSug();
+      })
+      .catch(function(){
+        clearTimeout(timer);
+        if(stale())return;
+        remote=[];remoteFor='';          /* 失败复位，下次输入重试 */
+      });
   }
 
   function renderSug(){
