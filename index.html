@@ -524,6 +524,47 @@ a{color:inherit;text-decoration:none}
   var groups=[].slice.call(document.querySelectorAll('.group'));
   rows.forEach(function(r){r.dataset.k=(r.dataset.k||'').toLowerCase()});
 
+  /* ── 远程联想 ─────────────────────────────────────────────
+     Bing 的 osjson.aspx 不返回 CORS 头，浏览器直连拿不到数据，
+     必须由后端转发。把你自己部署的服务地址填到下面即可联网：
+       Cloudflare Worker / Vercel / Netlify / Render 皆可
+     返回格式二选一：{"s":["a","b"]} 或 Bing 原生 ["输入",["a","b"]]
+     留空 = 纯本地（历史 + 站内直达），不发任何外部请求。       */
+  var SUGGEST_ENDPOINT='';
+  var remote=[], remoteFor='', pullT=0;
+
+  function pullSug(term){
+    if(!SUGGEST_ENDPOINT)return;
+    if(term===remoteFor)return;
+    remoteFor=term;
+    clearTimeout(pullT);
+    if(!term){remote=[];return}
+    /* 防抖：停 160ms 再发，避免逐字符打爆转发服务 */
+    pullT=setTimeout(function(){doPull(term)},160);
+  }
+
+  function doPull(term){
+    var ctrl=typeof AbortController==='function'?new AbortController():null;
+    /* 超时要够宽：转发服务可能要 2~3s 才回，太短会把结果一直中止掉 */
+    var timer=setTimeout(function(){if(ctrl)try{ctrl.abort()}catch(e){}},4000);
+    var url=SUGGEST_ENDPOINT+(SUGGEST_ENDPOINT.indexOf('?')>=0?'&':'?')+'q='+encodeURIComponent(term);
+    fetch(url,{signal:ctrl&&ctrl.signal})
+      .then(function(r){if(!r.ok)throw 0;return r.json()})
+      .then(function(d){
+        clearTimeout(timer);
+        var list=Array.isArray(d)?(Array.isArray(d[1])?d[1]:[]):((d&&d.s)||[]);
+        remote=Array.isArray(list)?list.slice(0,6):[];
+        if(q.value.trim()===term)renderSug();
+      })
+      .catch(function(){
+        clearTimeout(timer);
+        remote=[];
+        /* 失败必须复位 remoteFor，否则这个词以后再输也不会重试 */
+        if(remoteFor===term)remoteFor='';
+        if(q.value.trim()===term)renderSug();
+      });
+  }
+
   function esc(t){return t.replace(/[&<>"]/g,function(c){
     return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
   function mark(text,term){
@@ -560,6 +601,20 @@ a{color:inherit;text-decoration:none}
       out.push({t:'hist',tx:mark(h,term),raw:h,tag:'历史',
                 icon:'<svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1010 10A10 10 0 0012 2zm0 2a8 8 0 11-8 8 8 8 0 018-8zm-.5 3v6.2l5.2 3 .8-1.35-4.5-2.65V7z"/></svg>'});
     });
+
+    /* 远程联想（需要后端转发，未配置 SUGGEST_ENDPOINT 时为空） */
+    if(term&&remoteFor===term){
+      var lt2=term.toLowerCase();
+      remote.forEach(function(s){
+        if(!s||used['r'+s])return;
+        if(String(s).toLowerCase()===lt2)return;
+        /* 与历史共用 h 前缀：同一句话不再同时以「历史」和「联网」出现 */
+        if(used['h'+s])return;
+        used['r'+s]=1;
+        out.push({t:'sug',tx:mark(String(s),term),raw:String(s),tag:'联网',
+                  icon:'<svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1010 10A10 10 0 0012 2zm0 2a8 8 0 110 16 8 8 0 010-16zm0 2.6c1.5 0 3.4 2.5 4 7H8c.6-4.5 2.5-7 4-7zM6 12.4a20 20 0 00.9 3.6A8 8 0 016 12.4zm11.1 3.6A20 20 0 0018 12.4a8 8 0 01-.9 3.6zM8.2 18a82 82 0 003.8-5.4h.1A82 82 0 0015.8 18a8 8 0 01-7.6 0z"/></svg>'});
+      });
+    }
 
     /* 站内直达 */
     if(term){
@@ -612,11 +667,12 @@ a{color:inherit;text-decoration:none}
     if(o.t==='search'){pushHist(q.value.trim());hideSug();openNow(q.value.trim());return}
     if(o.t==='url'){hideSug();openNow(o.raw);return}
     if(o.t==='hist'){q.value=o.raw;filter();hideSug();openNow(o.raw);return}
+    if(o.t==='sug'){q.value=o.raw;filter();pushHist(o.raw);hideSug();openNow(o.raw);return}
     if(o.t==='site'){hideSug();window.open(o.raw,'_blank','noopener');return}
   }
 
   q.addEventListener('focus',renderSug);
-  q.addEventListener('input',function(){filter();renderSug()});
+  q.addEventListener('input',function(){filter();pullSug(q.value.trim());renderSug()});
   sug.addEventListener('mousedown',function(e){e.preventDefault()});
   sug.addEventListener('click',function(e){
     var b=e.target.closest('.opt');if(!b)return;
